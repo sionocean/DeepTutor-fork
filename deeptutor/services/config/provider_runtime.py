@@ -166,6 +166,19 @@ EMBEDDING_PROVIDERS: dict[str, EmbeddingProviderSpec] = {
         max_batch_items=20,
         multimodal=True,
     ),
+    "byteplus": EmbeddingProviderSpec(
+        label="BytePlus",
+        adapter="byteplus_multimodal",
+        # BytePlus skylark-embedding-vision only works on the native multimodal
+        # endpoint (typed `input`, one fused vector per request) — NOT the
+        # OpenAI-compatible /embeddings batch endpoint.
+        default_api_base="https://ark.ap-southeast.bytepluses.com/api/v3/embeddings/multimodal",
+        keywords=("skylark-embedding-vision", "skylark-embedding", "byteplus"),
+        is_local=False,
+        default_model="skylark-embedding-vision-251215",
+        default_dim=2048,
+        max_batch_items=16,
+    ),
     "custom": EmbeddingProviderSpec(
         label="OpenAI Compatible",
         mode="direct",

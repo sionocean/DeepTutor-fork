@@ -6,6 +6,7 @@ from .base import (
     EmbeddingRequest,
     EmbeddingResponse,
 )
+from .byteplus_multimodal import BytePlusMultiModalEmbeddingAdapter
 from .cohere import CohereEmbeddingAdapter
 from .dashscope_native import DashScopeMultiModalEmbeddingAdapter
 from .jina import JinaEmbeddingAdapter
@@ -20,6 +21,7 @@ ADAPTER_BACKENDS: dict[str, type[BaseEmbeddingAdapter]] = {
     "jina": JinaEmbeddingAdapter,
     "ollama": OllamaEmbeddingAdapter,
     "dashscope_native": DashScopeMultiModalEmbeddingAdapter,
+    "byteplus_multimodal": BytePlusMultiModalEmbeddingAdapter,
 }
 
 __all__ = [
@@ -31,6 +33,7 @@ __all__ = [
     "OpenAICompatibleEmbeddingAdapter",
     "OpenAISDKEmbeddingAdapter",
     "DashScopeMultiModalEmbeddingAdapter",
+    "BytePlusMultiModalEmbeddingAdapter",
     "JinaEmbeddingAdapter",
     "CohereEmbeddingAdapter",
     "OllamaEmbeddingAdapter",
