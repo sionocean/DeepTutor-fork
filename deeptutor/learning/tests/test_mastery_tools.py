@@ -225,6 +225,72 @@ async def test_grade_syncs_mastery_attempt_to_question_bank(path_id, session_sto
     assert entry["is_correct"] is False
 
 
+@pytest.mark.asyncio
+async def test_choice_quiz_rejects_bare_option_labels(path_id):
+    await _build_basic(path_id)
+    status = json.loads((await MasteryStatusTool().execute(_mastery_path_id=path_id)).content)
+    kp_id = status["next"]["knowledge_point_id"]
+
+    result = await MasteryQuizTool().execute(
+        _mastery_path_id=path_id,
+        knowledge_point_id=kp_id,
+        question="Which order is correct?",
+        expected_answer="A",
+        question_type="choice",
+        options=["A", "B", "C", "D"],
+    )
+
+    assert result.success is False
+    assert "full option bodies" in result.content
+
+
+@pytest.mark.asyncio
+async def test_choice_quiz_preserves_bodies_and_normalizes_answer(path_id, session_store):
+    session = await session_store.create_session(title="Choice Mastery")
+    await _build_basic(path_id)
+    status = json.loads((await MasteryStatusTool().execute(_mastery_path_id=path_id)).content)
+    kp_id = status["next"]["knowledge_point_id"]
+
+    quiz = await MasteryQuizTool().execute(
+        _mastery_path_id=path_id,
+        knowledge_point_id=kp_id,
+        question="Where is the stop condition added?",
+        expected_answer="Step 6",
+        question_type="choice",
+        options=[
+            "A: Step 2 — write the first tool",
+            "B: Step 4 — test one call",
+            "C: Step 6 — add the stop condition",
+            "D: Step 7 — add another tool",
+        ],
+    )
+    assert quiz.success is True
+
+    grade = json.loads(
+        (
+            await MasteryGradeTool().execute(
+                _mastery_path_id=path_id,
+                _session_id=session["id"],
+                _turn_id="turn_choice_1",
+                answer="C",
+            )
+        ).content
+    )
+    assert grade["is_correct"] is True
+
+    entries = await session_store.list_notebook_entries()
+    entry = entries["items"][0]
+    assert entry["options"] == {
+        "A": "Step 2 — write the first tool",
+        "B": "Step 4 — test one call",
+        "C": "Step 6 — add the stop condition",
+        "D": "Step 7 — add another tool",
+    }
+    assert entry["correct_answer"] == "C"
+    assert entry["user_answer"] == "C"
+    assert entry["is_correct"] is True
+
+
 # ── assess: the qualitative gate ─────────────────────────────────────────────
 
 
