@@ -20,12 +20,20 @@ def empty_grant(user_id: str) -> dict[str, Any]:
         "models": {"llm": []},
         "knowledge_bases": [],
         "skills": [],
-        # Tool whitelists share the partner-config semantics: ``None`` means
-        # "default" (every tool in the pool), ``[]`` means none, a list is an
-        # explicit whitelist. ``exec_enabled`` is a tri-state override on top
-        # of the deployment exec policy: ``None`` follows the policy, ``False``
-        # always denies, ``True`` is only honored where the sandbox can
-        # actually isolate users (SYSTEM isolation).
+        # Partners an admin has assigned to this user. Partners stay
+        # admin-managed (the /api/v1/partners CRUD router is admin-gated); a
+        # grant only lets the user *see and consult* the named partners — same
+        # shape as ``skills`` (``[{"partner_id": ...}]``).
+        "partners": [],
+        # Tool whitelists share the partner-config semantics for built-ins:
+        # ``enabled_tools=None`` means "default" (every tool in the pool),
+        # ``[]`` means none, a list is an explicit whitelist. MCP tools can
+        # proxy host-side capabilities, so non-admin runtime access treats
+        # ``mcp_tools=None`` as deny-by-default until an admin grants explicit
+        # names. ``exec_enabled`` is a tri-state override on top of the
+        # deployment exec policy: ``None`` follows the policy, ``False`` always
+        # denies, ``True`` is only honored where the sandbox can actually
+        # isolate users (SYSTEM isolation).
         "enabled_tools": None,
         "mcp_tools": None,
         "exec_enabled": None,
@@ -61,7 +69,7 @@ def normalize_grant(user_id: str, payload: dict[str, Any] | None) -> dict[str, A
     if not isinstance(items, list):
         items = []
     base["models"]["llm"] = [dict(item) for item in items if isinstance(item, dict)]
-    for key in ("knowledge_bases", "skills"):
+    for key in ("knowledge_bases", "skills", "partners"):
         values = payload.get(key) if isinstance(payload.get(key), list) else []
         base[key] = [dict(item) for item in values if isinstance(item, dict)]
     for key in ("enabled_tools", "mcp_tools"):

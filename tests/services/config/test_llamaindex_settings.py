@@ -20,12 +20,15 @@ def test_llamaindex_defaults_when_absent(tmp_path: Path) -> None:
 
 def test_llamaindex_roundtrip(tmp_path: Path) -> None:
     svc = RuntimeSettingsService(tmp_path, process_env={})
-    svc.save_llamaindex({"retrieval_profile": "vector", "top_k": 8, "chunk_size": 1024})
+    svc.save_llamaindex(
+        {"retrieval_profile": "vector", "top_k": 8, "chunk_size": 1024, "chunk_overlap": 0}
+    )
 
     loaded = svc.load_llamaindex(include_process_overrides=False)
     assert loaded["retrieval_profile"] == "vector"
     assert loaded["top_k"] == 8
     assert loaded["chunk_size"] == 1024
+    assert loaded["chunk_overlap"] == 0
     # Its own file beside the other per-feature settings.
     assert (tmp_path / "llamaindex.json").exists()
 
@@ -58,3 +61,15 @@ def test_llamaindex_profile_env_override(tmp_path: Path) -> None:
     overridden = RuntimeSettingsService(tmp_path, process_env={"RAG_RETRIEVAL_PROFILE": "hybrid"})
     loaded = overridden.load_llamaindex(include_process_overrides=True)
     assert loaded["retrieval_profile"] == "hybrid"
+
+
+def test_chunk_geometry_preserves_zero_overlap(monkeypatch) -> None:
+    from deeptutor.services.rag.pipelines.llamaindex import config
+
+    monkeypatch.setattr(
+        config,
+        "_load_runtime_settings",
+        lambda: {"chunk_size": 512, "chunk_overlap": 0},
+    )
+
+    assert config.chunk_geometry() == (512, 0)

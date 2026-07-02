@@ -105,6 +105,13 @@ def test_render_environment_uses_json_backed_runtime_names(monkeypatch, tmp_path
     assert env["DISABLE_SSL_VERIFY"] == "true"
     assert env["AUTH_ENABLED"] == "true"
     assert env["NEXT_PUBLIC_AUTH_ENABLED"] == "true"
+    # Server-side proxy contract consumed by web/proxy.ts (the Next.js
+    # middleware). DEEPTUTOR_AUTH_ENABLED gates the login redirect;
+    # DEEPTUTOR_API_BASE_URL is where the frontend server reaches the backend
+    # (falls back to localhost:<backend_port> when no in-network / external base
+    # is configured).
+    assert env["DEEPTUTOR_AUTH_ENABLED"] == "true"
+    assert env["DEEPTUTOR_API_BASE_URL"] == "http://localhost:8010"
     assert env["AUTH_TOKEN_EXPIRE_HOURS"] == "12"
     assert env["POCKETBASE_URL"] == "http://pocketbase:8090"
     assert "AUTH_SECRET" not in env
@@ -303,7 +310,13 @@ def test_document_parsing_v1_to_v2_migration(tmp_path: Path) -> None:
     assert mineru["language"] == "ch"
     assert mineru["allow_local_model_download"] is False
     # All engines are always present after normalization.
-    assert set(full["engines"]) == {"text_only", "mineru", "docling", "markitdown"}
+    assert set(full["engines"]) == {
+        "text_only",
+        "mineru",
+        "docling",
+        "markitdown",
+        "pymupdf4llm",
+    }
     # Migration is persisted to the renamed file (v2, no top-level flat keys);
     # the legacy mineru.json is gone.
     assert not service.path_for("mineru").exists()

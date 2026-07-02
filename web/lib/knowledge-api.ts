@@ -102,7 +102,6 @@ export interface KnowledgeUploadPolicy {
   extensions: string[];
   accept: string;
   max_file_size_bytes: number;
-  max_pdf_size_bytes: number;
 }
 
 export interface KnowledgeBaseFile {
@@ -160,11 +159,7 @@ function normalizeUploadPolicy(data: unknown): KnowledgeUploadPolicy {
     max_file_size_bytes:
       typeof payload?.max_file_size_bytes === "number"
         ? payload.max_file_size_bytes
-        : 100 * 1024 * 1024,
-    max_pdf_size_bytes:
-      typeof payload?.max_pdf_size_bytes === "number"
-        ? payload.max_pdf_size_bytes
-        : 50 * 1024 * 1024,
+        : 200 * 1024 * 1024,
   };
 }
 
@@ -647,6 +642,80 @@ export async function connectLinkedFolder(payload: {
     external_path: string;
     rag_provider: string;
     warnings: string[];
+  };
+}
+
+export interface LightRagServerProbe {
+  /** Reachable, a LightRAG server, and (if required) the API key is accepted. */
+  ok: boolean;
+  base_url: string;
+  reachable: boolean;
+  auth_required: boolean;
+  auth_ok: boolean;
+  core_version: string | null;
+  api_version: string | null;
+  /** Set when the server can't be connected (unreachable, bad key, …). */
+  error: string | null;
+}
+
+export async function probeLightRagServer(payload: {
+  serverUrl: string;
+  apiKey?: string;
+}): Promise<LightRagServerProbe> {
+  const res = await apiFetch(
+    apiUrl("/api/v1/knowledge/probe-lightrag-server"),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        server_url: payload.serverUrl,
+        api_key: payload.apiKey ?? "",
+      }),
+    },
+  );
+  if (!res.ok) {
+    throw new Error(
+      await readErrorDetail(res, "Failed to reach LightRAG server"),
+    );
+  }
+  return (await res.json()) as LightRagServerProbe;
+}
+
+export async function connectLightRagServer(payload: {
+  name: string;
+  serverUrl: string;
+  apiKey?: string;
+  mode?: string;
+}): Promise<{
+  status: string;
+  name: string;
+  server_url: string;
+  rag_provider: string;
+}> {
+  const res = await apiFetch(
+    apiUrl("/api/v1/knowledge/connect-lightrag-server"),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: payload.name,
+        server_url: payload.serverUrl,
+        api_key: payload.apiKey ?? "",
+        search_mode: payload.mode ?? "",
+      }),
+    },
+  );
+  if (!res.ok) {
+    throw new Error(
+      await readErrorDetail(res, "Failed to connect LightRAG server"),
+    );
+  }
+  invalidateKnowledgeCaches();
+  return (await res.json()) as {
+    status: string;
+    name: string;
+    server_url: string;
+    rag_provider: string;
   };
 }
 

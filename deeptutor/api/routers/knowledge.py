@@ -176,7 +176,6 @@ class SupportedFileTypesInfo(BaseModel):
     extensions: list[str]
     accept: str
     max_file_size_bytes: int
-    max_pdf_size_bytes: int
 
 
 IMAGE_ACCEPT_MIME_TYPES = {
@@ -1300,7 +1299,6 @@ async def get_supported_file_types():
         extensions=extensions,
         accept=",".join(dict.fromkeys(accept_items)),
         max_file_size_bytes=DocumentValidator.MAX_FILE_SIZE,
-        max_pdf_size_bytes=DocumentValidator.MAX_PDF_SIZE,
     )
 
 
@@ -1536,6 +1534,84 @@ async def connect_linked_folder_route(payload: ConnectFolderRequest):
         "external_path": entry["external_path"],
         "rag_provider": entry["rag_provider"],
         "warnings": result.warnings,
+    }
+
+
+class ProbeLightRagServerRequest(BaseModel):
+    server_url: str
+    api_key: str = ""
+
+
+class ConnectLightRagServerRequest(BaseModel):
+    name: str
+    server_url: str
+    api_key: str = ""
+    search_mode: str = ""
+
+
+@router.post("/probe-lightrag-server")
+async def probe_lightrag_server_route(payload: ProbeLightRagServerRequest):
+    """Test-connect to an external LightRAG server before binding a KB to it.
+
+    Returns the verdict (reachable? is it a LightRAG server? API key accepted?)
+    so the UI can confirm before any registration happens. Creates nothing.
+    """
+    from deeptutor.services.rag.pipelines.lightrag_server.probe import probe_server
+
+    server_url = (payload.server_url or "").strip()
+    if not server_url:
+        raise HTTPException(status_code=400, detail="server_url is required.")
+    result = await probe_server(server_url, payload.api_key or "")
+    return result.to_dict()
+
+
+@router.post("/connect-lightrag-server")
+async def connect_lightrag_server_route(payload: ConnectLightRagServerRequest):
+    """Connect an external LightRAG server as a retrieval-only knowledge base.
+
+    Re-probes server-side (never trusts the client's verdict), then registers a
+    pointer (``type: lightrag_server``). Retrieval is offloaded to the server's
+    ``/query`` endpoint — no copy, no local index.
+    """
+    from deeptutor.services.rag.pipelines.lightrag_server.config import SUPPORTED_MODES
+    from deeptutor.services.rag.pipelines.lightrag_server.probe import probe_server
+
+    name = (payload.name or "").strip()
+    server_url = (payload.server_url or "").strip()
+    if not name or not server_url:
+        raise HTTPException(status_code=400, detail="Both name and server_url are required.")
+
+    result = await probe_server(server_url, payload.api_key or "")
+    if not result.ok:
+        raise HTTPException(
+            status_code=400, detail=result.error or "Could not connect to the LightRAG server."
+        )
+
+    search_mode = (payload.search_mode or "").strip().lower()
+    if search_mode and search_mode not in SUPPORTED_MODES:
+        search_mode = ""
+
+    try:
+        manager = get_kb_manager()
+        entry = manager.register_lightrag_server_kb(
+            name,
+            result.base_url,
+            api_key=payload.api_key or "",
+            search_mode=search_mode,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error connecting LightRAG server: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {
+        "status": "connected",
+        "name": name,
+        "server_url": entry["server_url"],
+        "rag_provider": entry["rag_provider"],
     }
 
 
@@ -1857,15 +1933,10 @@ async def move_kb_file(kb_name: str, payload: MoveFilePayload):
 async def serve_kb_raw_file_text_preview(kb_name: str, filename: str):
     """Serve extracted plain text for a raw KB document preview."""
     target = _resolve_kb_raw_file_or_404(kb_name, filename)
-    max_bytes = (
-        DocumentValidator.MAX_PDF_SIZE
-        if target.suffix.lower() == ".pdf"
-        else DocumentValidator.MAX_FILE_SIZE
-    )
     try:
         text = extract_text_from_path(
             target,
-            max_bytes=max_bytes,
+            max_bytes=DocumentValidator.MAX_FILE_SIZE,
             max_chars=MAX_EXTRACTED_CHARS_PER_DOC,
         )
     except DocumentExtractionError as exc:

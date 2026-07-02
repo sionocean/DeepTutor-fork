@@ -37,6 +37,7 @@ notices:
   tool_unknown_error: "执行 {tool} 时出错。"
   too_many_tool_calls: "本轮请求 {requested} 次工具调用，已截断到上限 {limit}。"
   max_iterations_reached: "当前研究块已达到迭代上限，强制 FINISH。"
+  partial_results: "{total} 个研究子主题中有 {failed} 个未能完成；报告基于其余已收集的证据生成。"
   rephrase_cap_reached: "ask_user 已达上限（{max_rounds} 轮）。请基于已有回答 FINISH 输出最优的精炼主题。"
   rephrase_only_ask_user: "在 rephrase 阶段仅允许调用 `ask_user`；本次 `{tool}` 被忽略。"
   append_rejected_empty: "APPEND 已拒绝：标签后第一行需提供新主题的标题。"

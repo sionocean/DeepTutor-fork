@@ -45,6 +45,7 @@ notices:
   tool_unknown_error: "Error executing {tool}."
   too_many_tool_calls: "Requested {requested} tool calls; capped at {limit}."
   max_iterations_reached: "Reached the iteration ceiling for this block; forcing FINISH."
+  partial_results: "{failed} of {total} research subtopics could not be completed; the report is based on the remaining evidence."
   rephrase_cap_reached: "ask_user limit reached ({max_rounds} rounds). Emit FINISH now with the best refined topic you can produce from prior answers."
   rephrase_only_ask_user: "Inside rephrase you may only call `ask_user`; `{tool}` is ignored."
   append_rejected_empty: "APPEND rejected: provide a title on the first line after the label."

@@ -525,6 +525,36 @@ class ResearchPipeline:
                 client=client,
             )
 
+        # A planned block that didn't reach COMPLETED (raised, or exhausted its
+        # iteration budget without a FINISH) is backfilled with empty knowledge
+        # so the surviving blocks can still produce a useful report. But the run
+        # must not then look like a clean success — surface the shortfall both
+        # visibly (a warning notice) and in the result envelope so callers can
+        # tell the report is partial (issue #595).
+        incomplete = [rb for rb in researched if rb.block.status != TopicStatus.COMPLETED]
+        failed_block_titles = [rb.block.sub_topic for rb in incomplete]
+        if incomplete:
+            logger.warning(
+                "Deep Research partial: %d/%d blocks did not complete: %s",
+                len(incomplete),
+                len(researched),
+                failed_block_titles,
+            )
+            await stream.progress(
+                self._t(
+                    "notices.partial_results",
+                    default=(
+                        "{failed} of {total} research subtopics could not be completed; "
+                        "the report is based on the remaining evidence."
+                    ),
+                    failed=len(incomplete),
+                    total=len(researched),
+                ),
+                source=SOURCE,
+                stage="researching",
+                metadata={"trace_kind": "warning"},
+            )
+
         # ----- Phase 4 (iterative reporting) -----
         async with stream.stage(
             "reporting",
@@ -550,6 +580,9 @@ class ResearchPipeline:
                 "topic": refined_topic,
                 "block_count": len(researched),
                 "citation_count": len(citations.get_all_citations()),
+                "partial": bool(incomplete),
+                "failed_block_count": len(incomplete),
+                "failed_block_titles": failed_block_titles,
             },
         }
         await emit_capability_result(stream, result_payload, source=SOURCE, usage=self.usage)

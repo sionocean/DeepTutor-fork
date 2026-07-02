@@ -233,6 +233,42 @@ def test_lightrag_vision_adapter_preserves_messages(monkeypatch) -> None:
     assert captured["messages"] == [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
 
 
+def test_build_rag_skips_raganything_parser_install_check(monkeypatch) -> None:
+    """Regression for issue #594.
+
+    RAG-Anything validates its *default* parser (``mineru``) at LightRAG-init
+    time, even though DeepTutor only ever inserts a pre-parsed ``content_list``
+    and never uses RAG-Anything's parser. ``build_rag`` must pre-satisfy that
+    check so indexing with a different parse engine (e.g. pymupdf4llm) doesn't
+    hard-fail when MinerU is absent.
+    """
+    captured: dict[str, object] = {}
+
+    class _FakeConfig:
+        def __init__(self, *, working_dir) -> None:
+            self.working_dir = working_dir
+            self.parser = "mineru"  # RAG-Anything's default
+
+    class _FakeRagAnything:
+        def __init__(self, *, config, llm_model_func, vision_model_func, embedding_func) -> None:
+            # Mirror the real constructor: the install check starts unsatisfied.
+            self._parser_installation_checked = False
+            captured["config"] = config
+
+    fake_module = types.ModuleType("raganything")
+    fake_module.RAGAnything = _FakeRagAnything
+    fake_module.RAGAnythingConfig = _FakeConfig
+    monkeypatch.setitem(sys.modules, "raganything", fake_module)
+    monkeypatch.setattr(engine, "build_llm_model_func", lambda: "llm")
+    monkeypatch.setattr(engine, "build_vision_model_func", lambda: "vision")
+    monkeypatch.setattr(engine, "build_embedding_func", lambda: "embed")
+
+    rag = engine.build_rag(Path("/tmp/kb-wd"))  # noqa: S108
+
+    assert rag._parser_installation_checked is True
+    assert captured["config"].working_dir == "/tmp/kb-wd"
+
+
 def test_lightrag_query_initializes_raganything_before_aquery(monkeypatch) -> None:
     calls: list[str] = []
 

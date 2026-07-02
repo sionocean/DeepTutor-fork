@@ -75,14 +75,18 @@ DOCUMENT_PARSING_ENGINE_TEXT_ONLY = "text_only"
 DOCUMENT_PARSING_ENGINE_MINERU = "mineru"
 DOCUMENT_PARSING_ENGINE_DOCLING = "docling"
 DOCUMENT_PARSING_ENGINE_MARKITDOWN = "markitdown"
+DOCUMENT_PARSING_ENGINE_PYMUPDF4LLM = "pymupdf4llm"
 _DOCUMENT_PARSING_ENGINES = frozenset(
     {
         DOCUMENT_PARSING_ENGINE_TEXT_ONLY,
         DOCUMENT_PARSING_ENGINE_MINERU,
         DOCUMENT_PARSING_ENGINE_DOCLING,
         DOCUMENT_PARSING_ENGINE_MARKITDOWN,
+        DOCUMENT_PARSING_ENGINE_PYMUPDF4LLM,
     }
 )
+# Image formats PyMuPDF4LLM can write extracted page images as.
+_PYMUPDF4LLM_IMAGE_FORMATS = frozenset({"png", "jpg", "jpeg", "webp"})
 # Fresh installs default to the built-in text extractor so parsing works out of
 # the box without optional parser packages or model weights.
 # Migrated v1 installs keep MinerU (see ``_normalize_document_parsing``).
@@ -129,6 +133,16 @@ _DEFAULT_MARKITDOWN_ENGINE: dict[str, Any] = {
     "enable_llm_image_description": False,
 }
 
+# PyMuPDF4LLM engine slice. Pure-Python on top of PyMuPDF — no model downloads,
+# no CUDA, runs on low-end / GPU-less machines. Unlike text-only/markitdown it
+# can also extract embedded images and rendered vector graphics into the parse's
+# images/ dir. ``image_dpi`` is the render resolution for those images.
+_DEFAULT_PYMUPDF4LLM_ENGINE: dict[str, Any] = {
+    "write_images": True,
+    "image_format": "png",
+    "image_dpi": 150,
+}
+
 # Built-in text-only engine slice. It deliberately has no knobs: it reuses
 # DeepTutor's legacy text extractors for PDF / Office / text-like files.
 _DEFAULT_TEXT_ONLY_ENGINE: dict[str, Any] = {}
@@ -145,6 +159,7 @@ DEFAULT_DOCUMENT_PARSING_SETTINGS: dict[str, Any] = {
         DOCUMENT_PARSING_ENGINE_MINERU: _DEFAULT_MINERU_ENGINE,
         DOCUMENT_PARSING_ENGINE_DOCLING: _DEFAULT_DOCLING_ENGINE,
         DOCUMENT_PARSING_ENGINE_MARKITDOWN: _DEFAULT_MARKITDOWN_ENGINE,
+        DOCUMENT_PARSING_ENGINE_PYMUPDF4LLM: _DEFAULT_PYMUPDF4LLM_ENGINE,
     },
 }
 
@@ -498,6 +513,20 @@ class RuntimeSettingsService:
             "AUTH_TOKEN_EXPIRE_HOURS": str(auth["token_expire_hours"]),
             "AUTH_COOKIE_SECURE": _bool_env(auth["cookie_secure"]),
             "NEXT_PUBLIC_AUTH_ENABLED": _bool_env(auth["enabled"]),
+            # Consumed server-side by the Next.js middleware (web/proxy.ts) at
+            # request time — NOT inlined into the browser bundle. The proxy
+            # rewrites /api/* and /ws/* to DEEPTUTOR_API_BASE_URL and uses
+            # DEEPTUTOR_AUTH_ENABLED to gate the login redirect. The launcher and
+            # the Docker entrypoint both export these through render_environment,
+            # so the two deployment paths stay in sync. DEEPTUTOR_API_BASE_URL is
+            # the address the frontend *server* uses to reach the backend; the
+            # browser itself only ever talks to the frontend origin.
+            "DEEPTUTOR_API_BASE_URL": (
+                system["next_public_api_base"]
+                or system["next_public_api_base_external"]
+                or f"http://localhost:{system['backend_port']}"
+            ),
+            "DEEPTUTOR_AUTH_ENABLED": _bool_env(auth["enabled"]),
             "POCKETBASE_URL": integrations["pocketbase_url"],
             "POCKETBASE_PORT": str(integrations["pocketbase_port"]),
             "POCKETBASE_EXTERNAL_URL": integrations["pocketbase_external_url"],
@@ -750,6 +779,9 @@ class RuntimeSettingsService:
             DOCUMENT_PARSING_ENGINE_MARKITDOWN: self._normalize_markitdown_engine(
                 engines_in.get(DOCUMENT_PARSING_ENGINE_MARKITDOWN) or {}
             ),
+            DOCUMENT_PARSING_ENGINE_PYMUPDF4LLM: self._normalize_pymupdf4llm_engine(
+                engines_in.get(DOCUMENT_PARSING_ENGINE_PYMUPDF4LLM) or {}
+            ),
         }
 
         engine = _string(settings.get("engine")).lower().replace("-", "_").replace(" ", "_")
@@ -803,6 +835,16 @@ class RuntimeSettingsService:
             "enable_llm_image_description": _coerce_bool(
                 settings.get("enable_llm_image_description"), False
             ),
+        }
+
+    def _normalize_pymupdf4llm_engine(self, settings: dict[str, Any]) -> dict[str, Any]:
+        image_format = _string(settings.get("image_format")).lower() or "png"
+        if image_format not in _PYMUPDF4LLM_IMAGE_FORMATS:
+            image_format = "png"
+        return {
+            "write_images": _coerce_bool(settings.get("write_images"), True),
+            "image_format": image_format,
+            "image_dpi": _coerce_clamped_int(settings.get("image_dpi"), 150, 72, 600),
         }
 
     def _normalize_text_only_engine(self, _settings: dict[str, Any]) -> dict[str, Any]:
@@ -928,6 +970,7 @@ __all__ = [
     "DOCUMENT_PARSING_ENGINE_DOCLING",
     "DOCUMENT_PARSING_ENGINE_MARKITDOWN",
     "DOCUMENT_PARSING_ENGINE_MINERU",
+    "DOCUMENT_PARSING_ENGINE_PYMUPDF4LLM",
     "DOCUMENT_PARSING_ENGINE_TEXT_ONLY",
     "MINERU_MODE_CLOUD",
     "MINERU_MODE_LOCAL",

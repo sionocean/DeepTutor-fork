@@ -4,14 +4,12 @@ export interface KnowledgeUploadPolicy {
   extensions: string[];
   accept: string;
   max_file_size_bytes: number;
-  max_pdf_size_bytes: number;
 }
 
 export const DEFAULT_UPLOAD_POLICY: KnowledgeUploadPolicy = {
   extensions: [],
   accept: "",
-  max_file_size_bytes: 100 * 1024 * 1024,
-  max_pdf_size_bytes: 50 * 1024 * 1024,
+  max_file_size_bytes: 200 * 1024 * 1024,
 };
 
 export interface ProgressInfo {
@@ -54,10 +52,14 @@ export interface KnowledgeBase {
     embedding_model?: string;
     embedding_dim?: number;
     embedding_mismatch?: boolean;
-    /** Connected-source kind (e.g. "obsidian"); absent for ordinary indexed KBs. */
+    /** Connected-source kind (e.g. "obsidian", "subagent"); absent for ordinary indexed KBs. */
     type?: string;
     /** Absolute path of a connected Obsidian vault (when type === "obsidian"). */
     vault_path?: string;
+    /** Backend of a connected subagent (when type === "subagent"): "claude_code" | "codex" | "partner". */
+    agent_kind?: string;
+    /** Bound partner id when agent_kind === "partner". */
+    partner_id?: string;
   };
   progress?: ProgressInfo;
   statistics?: {
@@ -220,13 +222,6 @@ export function validateFiles(
 
     if (allowedExtensions.size > 0 && !allowedExtensions.has(extension)) {
       error = t("Unsupported file type");
-    } else if (
-      extension === ".pdf" &&
-      file.size > uploadPolicy.max_pdf_size_bytes
-    ) {
-      error = t("PDF files must be smaller than {{size}}.", {
-        size: formatFileSize(uploadPolicy.max_pdf_size_bytes),
-      });
     } else if (file.size > uploadPolicy.max_file_size_bytes) {
       error = t("This file exceeds the maximum size of {{size}}.", {
         size: formatFileSize(uploadPolicy.max_file_size_bytes),

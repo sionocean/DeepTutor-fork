@@ -86,8 +86,10 @@ def chunk_geometry() -> tuple[int, int]:
     """The configured ``(chunk_size, chunk_overlap)`` for indexing."""
     try:
         settings = _load_runtime_settings()
-        return int(settings.get("chunk_size", 512) or 512), int(
-            settings.get("chunk_overlap", 50) or 50
+        chunk_size = settings.get("chunk_size", 512)
+        chunk_overlap = settings.get("chunk_overlap", 50)
+        return int(chunk_size if chunk_size is not None else 512), int(
+            chunk_overlap if chunk_overlap is not None else 50
         )
     except Exception:
         return 512, 50

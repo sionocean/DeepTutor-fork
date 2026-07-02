@@ -20,7 +20,7 @@ export default function KnowledgePage() {
   const initialEngine = searchParams.get("engine");
 
   const {
-    kbs,
+    kbs: allKbs,
     providers,
     uploadPolicy,
     loading,
@@ -38,7 +38,16 @@ export default function KnowledgePage() {
     deleteKb,
     connectObsidian,
     connectLinkedFolder,
+    connectLightRagServer,
   } = useKnowledgeBases();
+
+  // Connected subagents are stored as ``type: subagent`` KBs so the chat
+  // composer can select them, but they are agents, not knowledge bases — keep
+  // them out of the Knowledge Center entirely.
+  const kbs = useMemo(
+    () => allKbs.filter((kb) => kb.metadata?.type !== "subagent"),
+    [allKbs],
+  );
 
   const [explicitSelection, setExplicitSelection] = useState<string | null>(
     initialKb,
@@ -295,6 +304,7 @@ export default function KnowledgePage() {
         onCreate={handleCreate}
         onConnectLinkedFolder={connectLinkedFolder}
         onConnectObsidian={connectObsidian}
+        onConnectLightRagServer={connectLightRagServer}
         initialMode={createPreset?.mode}
         initialSource={createPreset?.source}
         onConfigureProvider={() => {

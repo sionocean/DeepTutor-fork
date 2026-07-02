@@ -16,9 +16,17 @@ race on a shared object.
 from __future__ import annotations
 
 import json
+import logging
 from typing import TYPE_CHECKING, Any
 import uuid
 
+from deeptutor.capabilities.mastery.choices import (
+    format_options,
+    has_option_bodies,
+    parse_options,
+    recover_options_from_turn,
+    resolve_answer,
+)
 from deeptutor.core.tool_protocol import BaseTool, ToolDefinition, ToolParameter, ToolResult
 
 # ``learning.models`` and ``learning.policy`` only depend on pydantic — safe to
@@ -58,6 +66,7 @@ MASTERY_TOOL_NAMES: tuple[str, ...] = (
 
 _QUESTION_TYPES = ("choice", "short", "open")
 _ALLOWED_KP_TYPES = {t.value for t in KnowledgeType}
+logger = logging.getLogger(__name__)
 
 
 def _new_service() -> LearningService:
@@ -69,6 +78,84 @@ def _new_service() -> LearningService:
 
 def _resolve_path_id(kwargs: dict[str, Any]) -> str:
     return str(kwargs.get("_mastery_path_id") or "").strip()
+
+
+def _resolve_session_id(kwargs: dict[str, Any]) -> str:
+    return str(kwargs.get("_session_id") or "").strip()
+
+
+def _resolve_turn_id(kwargs: dict[str, Any]) -> str:
+    return str(kwargs.get("_turn_id") or "").strip()
+
+
+def _question_bank_type(question_type: str) -> str:
+    qtype = str(question_type or "").strip().lower()
+    if qtype == "choice":
+        return "choice"
+    if qtype == "open":
+        return "written"
+    return "short_answer"
+
+
+async def _resolve_pending_choice(
+    pending: PendingQuestion, turn_id: str
+) -> tuple[dict[str, str], str]:
+    """Resolve a pending choice question's ``({label: body}, expected_label)``.
+
+    Re-parses the bodies stored at registration; for legacy paths that stored
+    only ``["A", "B", ...]`` it recovers the real bodies from the turn's
+    ``ask_user`` event. The expected answer is normalised to a stable label
+    when it resolves, else left as registered.
+    """
+    options = parse_options(list(pending.options or []))
+    if not has_option_bodies(options):
+        try:
+            from deeptutor.services.session import get_sqlite_session_store
+
+            options = await recover_options_from_turn(
+                get_sqlite_session_store(), turn_id, pending.prompt
+            )
+        except Exception:
+            logger.warning("Failed to recover legacy mastery choice options", exc_info=True)
+            options = {}
+    return options, resolve_answer(pending.expected_answer, options) or pending.expected_answer
+
+
+async def _sync_mastery_attempt_to_question_bank(
+    *,
+    session_id: str,
+    turn_id: str,
+    pending: PendingQuestion,
+    user_answer: str,
+    is_correct: bool,
+    choice_options: dict[str, str] | None = None,
+    correct_answer: str | None = None,
+) -> None:
+    if not session_id:
+        return
+    item = {
+        "turn_id": turn_id,
+        "question_id": pending.question_id,
+        "question": pending.prompt,
+        "question_type": _question_bank_type(pending.question_type),
+        "options": choice_options or parse_options(list(pending.options or [])),
+        "correct_answer": correct_answer or pending.expected_answer,
+        "explanation": "",
+        "difficulty": "",
+        "user_answer": user_answer,
+        "is_correct": is_correct,
+    }
+    try:
+        from deeptutor.services.session import get_sqlite_session_store
+
+        await get_sqlite_session_store().upsert_notebook_entries(session_id, [item])
+    except Exception:
+        logger.warning(
+            "Failed to sync mastery question %s to question bank for session %s",
+            pending.question_id,
+            session_id,
+            exc_info=True,
+        )
 
 
 def _json_result(payload: dict[str, Any], *, meta_key: str, success: bool = True) -> ToolResult:
@@ -139,7 +226,8 @@ class MasteryQuizTool(BaseTool):
                 "and you never re-state the answer later). After calling this, "
                 "present the question with the ask_user tool so the learner answers "
                 "on an interactive card (for choices, give ask_user options short "
-                "labels like A/B/C and set the correct label as expected_answer); "
+                "labels like A/B/C, pass every full option body here, and set the "
+                "correct label as expected_answer); "
                 "then call mastery_grade with their answer. For CONCEPT / DESIGN "
                 "objectives use mastery_assess instead."
             ),
@@ -173,7 +261,12 @@ class MasteryQuizTool(BaseTool):
                 ToolParameter(
                     name="options",
                     type="array",
-                    description="Choice labels, when question_type='choice'.",
+                    description=(
+                        "For question_type='choice', every full option in label order, "
+                        "for example ['A: first answer', 'B: second answer']. Never "
+                        "pass bare labels such as ['A', 'B', 'C', 'D']. Use the same "
+                        "bodies as the ask_user option descriptions."
+                    ),
                     required=False,
                     items={"type": "string"},
                 ),
@@ -196,6 +289,30 @@ class MasteryQuizTool(BaseTool):
         if q_type not in _QUESTION_TYPES:
             q_type = "short"
         options = [str(o) for o in (kwargs.get("options") or []) if str(o).strip()]
+        if q_type == "choice":
+            choice_options = parse_options(options)
+            if not has_option_bodies(choice_options):
+                return ToolResult(
+                    content=(
+                        "Choice questions need full option bodies in mastery_quiz.options "
+                        "(for example ['A: first answer', 'B: second answer']), not only "
+                        "the labels A/B/C/D. Retry mastery_quiz with the exact option "
+                        "descriptions you will show through ask_user."
+                    ),
+                    success=False,
+                )
+            resolved_expected = resolve_answer(expected, choice_options)
+            if not resolved_expected:
+                return ToolResult(
+                    content=(
+                        "Choice expected_answer must be an option label such as A/B/C/D, "
+                        "or uniquely match one full option body. Retry mastery_quiz with "
+                        "the correct label."
+                    ),
+                    success=False,
+                )
+            expected = resolved_expected
+            options = format_options(choice_options)
 
         service = _new_service()
         progress = service.get_or_create(path_id)
@@ -270,15 +387,31 @@ class MasteryGradeTool(BaseTool):
                 content="No question is awaiting an answer. Pose one with mastery_quiz first.",
                 success=False,
             )
+        choice_options: dict[str, str] = {}
+        expected_answer = pending.expected_answer
+        if pending.question_type == "choice":
+            choice_options, expected_answer = await _resolve_pending_choice(
+                pending, _resolve_turn_id(kwargs)
+            )
+
         is_correct = service.grade_and_record(
             progress,
             question_id=pending.question_id,
             knowledge_point_id=pending.knowledge_point_id,
             module_id=pending.module_id,
             user_answer=answer,
-            expected_answer=pending.expected_answer,
+            expected_answer=expected_answer,
             question_type=pending.question_type,
             scheduler=scheduler,
+        )
+        await _sync_mastery_attempt_to_question_bank(
+            session_id=_resolve_session_id(kwargs),
+            turn_id=_resolve_turn_id(kwargs),
+            pending=pending,
+            user_answer=answer,
+            is_correct=is_correct,
+            choice_options=choice_options,
+            correct_answer=expected_answer,
         )
         service.clear_pending_question(progress)
         kp, _, _ = find_knowledge_point(progress, pending.knowledge_point_id)

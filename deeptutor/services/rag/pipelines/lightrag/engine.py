@@ -39,12 +39,23 @@ def build_rag(working_dir: Path) -> Any:
     from raganything import RAGAnything, RAGAnythingConfig
 
     config = RAGAnythingConfig(working_dir=str(working_dir))
-    return RAGAnything(
+    rag = RAGAnything(
         config=config,
         llm_model_func=build_llm_model_func(),
         vision_model_func=build_vision_model_func(),
         embedding_func=build_embedding_func(),
     )
+    # DeepTutor always feeds RAG-Anything a pre-parsed ``content_list`` (the
+    # parse layer runs upstream via DeepTutor's own ParseService), so
+    # RAG-Anything's bundled document parser is never invoked. Its LightRAG init
+    # nevertheless runs a one-time installation check on its *default* parser
+    # (``mineru``); when MinerU isn't installed that check hard-fails indexing
+    # with "Parser 'mineru' is not properly installed" — even though the user
+    # picked an entirely different parse engine (see issue #594). Marking the
+    # check as already satisfied skips that spurious gate for a parser we don't
+    # use, while leaving the real pre-parsed insert path untouched.
+    rag._parser_installation_checked = True
+    return rag
 
 
 async def insert(rag: Any, content_list: list[dict], *, file_name: str, doc_id: str) -> None:

@@ -35,6 +35,7 @@ import type { SelectedHistorySession } from "@/components/chat/HistorySessionPic
 import type { SelectedQuestionEntry } from "@/components/chat/QuestionBankPicker";
 import ChatComposer from "@/components/chat/home/ChatComposer";
 import { ChatMessageList } from "@/components/chat/home/ChatMessages";
+import SessionLoadingView from "@/components/chat/home/SessionLoadingView";
 // Imported eagerly so the drawer shell is always mounted off-screen —
 // clicking a chip becomes a single CSS class flip, no chunk fetch + double
 // render. The heavy renderers inside still load lazily.
@@ -96,6 +97,7 @@ import {
   type OutlineItem,
 } from "@/lib/research-types";
 import { listKnowledgeBases } from "@/lib/knowledge-api";
+import { getSubagentSettings } from "@/lib/subagents-api";
 import { listLLMOptions, type LLMOption } from "@/lib/llm-options";
 import {
   getEnabledOptionalTools,
@@ -281,6 +283,12 @@ const CAPABILITIES: CapabilityDef[] = [
 interface KnowledgeBase {
   name: string;
   is_default?: boolean;
+  metadata?: {
+    /** Connected-source kind, e.g. "obsidian" | "subagent". */
+    type?: string;
+    /** Backend of a connected subagent: "claude_code" | "codex" | "partner". */
+    agent_kind?: string;
+  };
 }
 
 interface PendingAttachment {
@@ -331,6 +339,19 @@ export default function ChatPage() {
   } = useUnifiedChat();
 
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
+  // A connected agent to preselect once it loads, from `?agent=<name>` on the
+  // URL (the partner list page links here to drop straight into a chat with a
+  // partner). Captured once at first client render — the URL is rewritten to
+  // `/home/<sessionId>` as soon as the new session is created, dropping the
+  // query — so we can't read it later from the live search params.
+  const pendingAgentRef = useRef<string | null | undefined>(undefined);
+  if (pendingAgentRef.current === undefined) {
+    pendingAgentRef.current =
+      typeof window === "undefined"
+        ? null
+        : new URLSearchParams(window.location.search).get("agent");
+  }
+  const agentPreselectDoneRef = useRef(false);
   const [llmOptions, setLLMOptions] = useState<LLMOption[]>([]);
   const [activeLLMDefault, setActiveLLMDefault] = useState<LLMSelection | null>(
     null,
@@ -515,6 +536,10 @@ export default function ChatPage() {
   const spaceMenuRef = useRef<HTMLDivElement>(null);
   const spaceBtnRef = useRef<HTMLButtonElement>(null);
   const initialLoadRef = useRef(false);
+  // Session-loading overlay: shown while navigating from chat-history →
+  // session detail. Holds an AbortController so the user can cancel.
+  const [sessionLoading, setSessionLoading] = useState(false);
+  const loadAbortRef = useRef<AbortController | null>(null);
   // Bridge ref: ``ChatComposer`` writes a prefill function into this on
   // mount; ``ChatMessageList`` reads it via ``handlePrefillComposer`` so an
   // ``AskUserOptions`` chip click can drop text into the composer textarea.
@@ -840,16 +865,65 @@ export default function ChatPage() {
     }
   }, []);
   /* ---- URL-driven session loading ---- */
+
+  const navigateToHome = useCallback(() => {
+    router.replace("/home", { scroll: false });
+  }, [router]);
+
+  /** Abort in-flight load + navigate home. */
+  const cancelSessionLoad = useCallback(() => {
+    loadAbortRef.current?.abort();
+    loadAbortRef.current = null;
+    setSessionLoading(false);
+    navigateToHome();
+  }, [navigateToHome]);
+
+  /**
+   * Shared helper: kick off a load. The user can cancel via the ✕ button;
+   * otherwise the loading overlay stays until the API responds (no timeout).
+   */
+  const startSessionLoad = useCallback(
+    (sid: string) => {
+      loadAbortRef.current?.abort();
+      const ctrl = new AbortController();
+      loadAbortRef.current = ctrl;
+      setSessionLoading(true);
+
+      void loadSession(sid, ctrl.signal)
+        .then(() => {
+          if (!ctrl.signal.aborted) {
+            loadAbortRef.current = null;
+            setSessionLoading(false);
+          }
+        })
+        .catch(() => {
+          if (!ctrl.signal.aborted) {
+            loadAbortRef.current = null;
+            setSessionLoading(false);
+            navigateToHome();
+          }
+        });
+    },
+    [loadSession, navigateToHome],
+  );
+
+  // Initial mount — load the session from the URL.
+  // Uses a ref-based flag so Strict Mode double-mount doesn't break the flow:
+  // when React tears down + re-mounts in dev, we reset initialLoadRef in
+  // cleanup so the second mount restarts the load cleanly. The abort is
+  // deliberately OMITTED from cleanup — cancelSessionLoad handles
+  // user-initiated cancellation.
   useEffect(() => {
     if (initialLoadRef.current) return;
     initialLoadRef.current = true;
     if (sessionIdParam) {
-      void loadSession(sessionIdParam).catch(() => {
-        router.replace("/home", { scroll: false });
-      });
+      startSessionLoad(sessionIdParam);
     } else {
       newSession();
     }
+    return () => {
+      initialLoadRef.current = false;
+    };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // When URL param changes (sidebar navigation), load the corresponding session
@@ -857,15 +931,20 @@ export default function ChatPage() {
   useEffect(() => {
     if (sessionIdParam === prevSessionIdParam.current) return;
     prevSessionIdParam.current = sessionIdParam;
+    // Abort any in-flight session load from the previous param
+    loadAbortRef.current?.abort();
+    loadAbortRef.current = null;
     if (sessionIdParam) {
-      if (sessionIdParam === state.sessionId) return;
-      void loadSession(sessionIdParam).catch(() => {
-        router.replace("/home", { scroll: false });
-      });
+      if (sessionIdParam === state.sessionId) {
+        setSessionLoading(false);
+        return;
+      }
+      startSessionLoad(sessionIdParam);
     } else {
       newSession();
+      setSessionLoading(false);
     }
-  }, [sessionIdParam, loadSession, newSession, router, state.sessionId]);
+  }, [sessionIdParam, startSessionLoad, newSession, state.sessionId]);
 
   // When a new session_id is assigned by the server, update the URL
   useEffect(() => {
@@ -1372,6 +1451,11 @@ export default function ChatPage() {
         if (!researchValidation.valid) return;
         config = buildResearchWSConfig(researchConfig);
       }
+      // When a connected agent is selected, carry the per-turn consult budget
+      // (how many times DeepTutor may ask it) so the subagent capability uses it.
+      if (selectedAgent && subagentBudget) {
+        config = { ...(config ?? {}), subagent_consult_budget: subagentBudget };
+      }
 
       const memoryPayload = [...memoryReferencesPayload];
       const messageContent =
@@ -1497,6 +1581,66 @@ export default function ChatPage() {
     },
     [setKBs, state.knowledgeBases],
   );
+
+  // Connected subagents are stored as ``type: subagent`` KBs (so selection
+  // rides the same knowledge_bases path), but in the composer they get their
+  // own single-select Bot chip — distinct from real knowledge bases.
+  const agentNameSet = useMemo(
+    () =>
+      new Set(
+        knowledgeBases
+          .filter((kb) => kb.metadata?.type === "subagent")
+          .map((kb) => kb.name),
+      ),
+    [knowledgeBases],
+  );
+  const kbOptions = useMemo(
+    () => knowledgeBases.filter((kb) => kb.metadata?.type !== "subagent"),
+    [knowledgeBases],
+  );
+  const agentOptions = useMemo(
+    () =>
+      knowledgeBases
+        .filter((kb) => kb.metadata?.type === "subagent")
+        .map((kb) => ({ name: kb.name, kind: kb.metadata?.agent_kind })),
+    [knowledgeBases],
+  );
+  const selectedKbOnly = useMemo(
+    () => state.knowledgeBases.filter((n) => !agentNameSet.has(n)),
+    [state.knowledgeBases, agentNameSet],
+  );
+  const selectedAgent = useMemo(
+    () => state.knowledgeBases.find((n) => agentNameSet.has(n)) ?? null,
+    [state.knowledgeBases, agentNameSet],
+  );
+  const handleSelectAgent = useCallback(
+    (name: string | null) => {
+      // Single-select: clear any selected agent, then set the new one (if any).
+      const withoutAgents = state.knowledgeBases.filter(
+        (n) => !agentNameSet.has(n),
+      );
+      setKBs(name ? [...withoutAgents, name] : withoutAgents);
+    },
+    [setKBs, state.knowledgeBases, agentNameSet],
+  );
+  // Honor `?agent=<name>` once its connection KB has loaded: preselect it so a
+  // partner opened from the partner list starts the chat already targeting it.
+  useEffect(() => {
+    if (agentPreselectDoneRef.current) return;
+    const name = pendingAgentRef.current;
+    if (!name || !agentNameSet.has(name)) return;
+    agentPreselectDoneRef.current = true;
+    handleSelectAgent(name);
+  }, [agentNameSet, handleSelectAgent]);
+  // How many times DeepTutor may consult the selected agent this turn. Seeded
+  // from the configured default; the composer's stepper overrides it per turn
+  // (sent in the request config, read by the subagent capability).
+  const [subagentBudget, setSubagentBudget] = useState<number | null>(null);
+  useEffect(() => {
+    void getSubagentSettings()
+      .then((s) => setSubagentBudget(s.consult_budget))
+      .catch(() => undefined);
+  }, []);
   const handleSelectNotebookPicker = useCallback(() => {
     setShowNotebookPicker(true);
   }, []);
@@ -1626,6 +1770,10 @@ export default function ChatPage() {
       <GeogebraTabProvider>
         <QuizFollowupBridge viewerPanelRef={viewerPanelRef} />
         <GeogebraTabBridge viewerPanelRef={viewerPanelRef} />
+        <SubagentTabWatcher
+          messages={state.messages}
+          viewerPanelRef={viewerPanelRef}
+        />
         <div
           // When the preview drawer is open AND the viewport is wide enough,
           // push the chat content to the left by the drawer's width so the two
@@ -1705,7 +1853,9 @@ export default function ChatPage() {
             </div>
           </div>
           <div className="mx-auto flex w-full max-w-[960px] flex-1 min-h-0 flex-col overflow-hidden px-6">
-            {!hasMessages ? (
+            {sessionLoading ? (
+              <SessionLoadingView onCancel={cancelSessionLoad} />
+            ) : !hasMessages ? (
               <div className="flex flex-1 min-h-0 flex-col items-center justify-end pb-14 animate-fade-in">
                 <div className="flex items-center justify-center gap-4">
                   <img
@@ -1782,7 +1932,12 @@ export default function ChatPage() {
               attachments={attachments}
               attachmentError={attachmentError}
               activeCap={activeCap}
-              knowledgeBases={knowledgeBases}
+              knowledgeBases={kbOptions}
+              connectedAgents={agentOptions}
+              selectedAgent={selectedAgent}
+              onSelectAgent={handleSelectAgent}
+              subagentBudget={subagentBudget}
+              onSubagentBudgetChange={setSubagentBudget}
               llmOptions={llmOptions}
               activeLLMDefault={activeLLMDefault}
               llmSelection={state.llmSelection}
@@ -1796,7 +1951,7 @@ export default function ChatPage() {
               notebookReferenceGroups={notebookReferenceGroups}
               selectedPersona={null}
               selectedMemoryFiles={selectedMemoryFiles}
-              selectedKnowledgeBases={state.knowledgeBases}
+              selectedKnowledgeBases={selectedKbOnly}
               isStreaming={state.isStreaming}
               isVisualizeMode={isVisualizeMode}
               capabilityNeedsConfig={capabilityNeedsConfig}
@@ -1944,6 +2099,50 @@ function GeogebraTabBridge({
     });
     return () => controller.setOpenHandler(null);
   }, [controller, viewerPanelRef]);
+  return null;
+}
+
+/**
+ * Watches the turn's messages for connected-subagent runs and mirrors each
+ * (grouped by the consult's call id) into its own side-viewer tab — opening +
+ * focusing the panel when a consult starts, then live-refreshing as the
+ * agent's native events stream in. Keeps the chat trace compact while the full
+ * run shows in the sidebar.
+ */
+function SubagentTabWatcher({
+  messages,
+  viewerPanelRef,
+}: {
+  messages: { events?: StreamEvent[] }[];
+  viewerPanelRef: React.MutableRefObject<SessionViewerPanelHandle | null>;
+}) {
+  useEffect(() => {
+    // Group by turn so all of one turn's consults (DeepTutor may ask the agent
+    // several questions in a row, each its own tool call) land in one tab as a
+    // single running dialogue; fall back to the call id when no turn is set.
+    const groups = new Map<string, { label: string; events: StreamEvent[] }>();
+    for (const msg of messages) {
+      for (const ev of msg.events ?? []) {
+        const meta = (ev.metadata ?? {}) as Record<string, unknown>;
+        if (meta.trace_kind !== "subagent_event") continue;
+        const key = String(meta.turn_id || meta.call_id || meta.trace_id || "");
+        if (!key) continue;
+        const existing = groups.get(key);
+        const label = String(
+          meta.subagent_name || existing?.label || "Subagent",
+        );
+        if (existing) {
+          existing.label = label;
+          existing.events.push(ev);
+        } else {
+          groups.set(key, { label, events: [ev] });
+        }
+      }
+    }
+    for (const [key, group] of groups) {
+      viewerPanelRef.current?.openSubagentTab(key, group.label, group.events);
+    }
+  }, [messages, viewerPanelRef]);
   return null;
 }
 
